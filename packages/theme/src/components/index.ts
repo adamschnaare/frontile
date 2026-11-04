@@ -17,6 +17,7 @@ export * from './spinner';
 export * from './table';
 export * from './segmented-control';
 export * from './tabs';
+export * from './app-layout';
 export * from './accordion';
 export * from './calendar';
 export * from './pagination';
