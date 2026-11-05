@@ -1,6 +1,7 @@
 import Component from '@glimmer/component';
 import { tracked, cached } from '@glimmer/tracking';
 import type Owner from '@ember/owner';
+import { assert } from '@ember/debug';
 import { on } from '@ember/modifier';
 import { modifier } from 'ember-modifier';
 import { useStyles } from '@frontile/theme';
@@ -15,7 +16,11 @@ import { ref } from '../../../utils/ref';
 import { ControlBlurTracker } from '../../../-private/control-blur';
 import { triggerFormInputEvent } from '../../../utils/forms-utils-index';
 import { canDeselectKey, keyAndLabelForItem } from '../../../utils/listManager';
-import { filterAndRankItems } from '../../../utils/filter';
+import {
+  filterAndRankItems,
+  limitItems,
+  type DisplayLimitContentArgs
+} from '../../../utils/filter';
 
 import { SelectNativeMirror } from './native-mirror';
 import { SelectTrigger } from './trigger';
@@ -55,8 +60,9 @@ class Select<T = unknown> extends Component<SelectSignature<T>> {
    *
    * The hidden select is deliberately given the *unfiltered* `@items` — it
    * carries the form value, which must not shrink to the filter — so this
-   * covers the whole list even while the listbox is filtered down. Chips and
-   * the joined text value can therefore be resolved straight from it.
+   * covers every selected item even while the listbox is filtered down
+   * (`mirroredItems` keeps them past `@displayLimit` too). Chips and the
+   * joined text value can therefore be resolved straight from it.
    */
   @tracked nodes: ListItem[] = [];
 
@@ -160,10 +166,18 @@ class Select<T = unknown> extends Component<SelectSignature<T>> {
   };
 
   /**
+   * Enter in the open filter picks the active option (the Listbox handles
+   * that), so it must not also submit a wrapping form, the same guard
+   * Autocomplete has. Closed, Enter is left to the form.
+   *
    * Backspace on an empty filter removes the last chip — the familiar tag-input
    * gesture. With text in the filter, Backspace edits the text as usual.
    */
   handleFilterKeydown = (event: KeyboardEvent) => {
+    if (event.key === 'Enter' && this.isOpen) {
+      event.preventDefault();
+      return;
+    }
     if (event.key !== 'Backspace' || !this.showChips) {
       return;
     }
@@ -498,6 +512,9 @@ class Select<T = unknown> extends Component<SelectSignature<T>> {
    *   readable anywhere else in that case, so the name carries it: the control
    *   name *and* the selected options' text.
    *
+   * With nothing selected the placeholder is the trigger's visible text, so
+   * it joins the name (`Merchant, All merchants`) rather than being dropped.
+   *
    * The two halves are composed so that the separator only appears when both
    * are there. A selected key with no registered option behind it resolves to
    * no text at all, and `"Owner, "` is announced as "Owner comma"; and with
@@ -507,6 +524,14 @@ class Select<T = unknown> extends Component<SelectSignature<T>> {
    */
   get triggerAccessibleName(): string {
     const name = this.args.label || this.args.placeholder;
+
+    // Nothing selected: the placeholder is the visible text, so it joins the
+    // name (WCAG 2.5.3 Label in Name).
+    if (!this.hasSelection && this.args.label && this.args.placeholder) {
+      return this.args.label === this.args.placeholder
+        ? this.args.label
+        : `${this.args.label}, ${this.args.placeholder}`;
+    }
 
     // Chips mode names the *control* only -- the chips are read separately --
     // and has no better fallback than the literal.
@@ -603,6 +628,9 @@ class Select<T = unknown> extends Component<SelectSignature<T>> {
     return this.selectedTextValue;
   }
 
+  // Cached: the listbox, the empty content and the display limit read it, and
+  // filtering a long list on every read would repeat the work per keystroke.
+  @cached
   get filteredItems() {
     if (this.filterValue === undefined) {
       return this.args.items;
@@ -618,6 +646,60 @@ class Select<T = unknown> extends Component<SelectSignature<T>> {
 
   get showEmptyContent() {
     return this.filteredItems?.length === 0 && !this.args.hideEmptyContent;
+  }
+
+  /**
+   * The matches the listbox renders: `filteredItems`, capped by
+   * `@displayLimit`.
+   */
+  @cached
+  get displayedItems() {
+    const { displayLimit, isFilterable } = this.args;
+    assert(
+      `Select: @displayLimit must be a positive integer, received ${String(displayLimit)}`,
+      displayLimit === undefined ||
+        (Number.isInteger(displayLimit) && displayLimit > 0)
+    );
+    assert(
+      'Select: @displayLimit requires @isFilterable, otherwise the options past the limit cannot be reached',
+      displayLimit === undefined || isFilterable
+    );
+
+    const selectedKeys = this.selectedKeys;
+    return limitItems(this.filteredItems, displayLimit, (item) =>
+      selectedKeys.includes(keyAndLabelForItem(item).key)
+    );
+  }
+
+  /**
+   * The options the hidden native `<select>` holds: the unfiltered `@items`,
+   * capped by `@displayLimit` like the listbox, plus every selected option.
+   *
+   * The form value is the selected options, so it never needs the others.
+   * Holding every item instead costs the same rendering the limit saves in
+   * the listbox, and it is paid while the Select is closed: a page with a
+   * hundred Selects over a thousand items each built a hundred thousand
+   * hidden options. Unfiltered, so a filter can't change what the form sees.
+   */
+  @cached
+  get mirroredItems() {
+    const selectedKeys = this.selectedKeys;
+    return limitItems(this.args.items, this.args.displayLimit, (item) =>
+      selectedKeys.includes(keyAndLabelForItem(item).key)
+    );
+  }
+
+  /**
+   * What the display limit content reports, or `undefined` when nothing is
+   * left out.
+   */
+  get displayLimitContent(): DisplayLimitContentArgs | undefined {
+    const shown = this.displayedItems?.length ?? 0;
+    const total = this.filteredItems?.length ?? 0;
+    if (shown === total || this.args.hideDisplayLimitContent) {
+      return undefined;
+    }
+    return { shown, total };
   }
 
   get autoActivateMode(): 'first' | 'selected' {
@@ -681,7 +763,7 @@ class Select<T = unknown> extends Component<SelectSignature<T>> {
         >
           <VisuallyHidden>
             <SelectNativeMirror
-              @items={{@items}}
+              @items={{this.mirroredItems}}
               @allowEmpty={{@allowEmpty}}
               @disabledKeys={{@disabledKeys}}
               @selectionMode={{@selectionMode}}
@@ -825,7 +907,7 @@ class Select<T = unknown> extends Component<SelectSignature<T>> {
             @preventAutoFocus={{true}}
           >
             <Listbox
-              @items={{this.filteredItems}}
+              @items={{this.displayedItems}}
               @allowEmpty={{@allowEmpty}}
               @variant={{this.variant}}
               @disabledKeys={{@disabledKeys}}
@@ -870,6 +952,23 @@ class Select<T = unknown> extends Component<SelectSignature<T>> {
                 {{/if}}
               </div>
             {{/if}}
+            {{#if this.displayLimitContent}}
+              <div
+                class={{this.classes.displayLimitContent
+                  class=@classes.displayLimitContent
+                }}
+                data-part="display-limit-content"
+              >
+                {{#if (has-block "displayLimitContent")}}
+                  {{yield this.displayLimitContent to="displayLimitContent"}}
+                {{else}}
+                  Showing
+                  {{this.displayLimitContent.shown}}
+                  of
+                  {{this.displayLimitContent.total}}. Type to narrow down.
+                {{/if}}
+              </div>
+            {{/if}}
           </p.Content>
         </Popover>
       </FormControl>
@@ -882,6 +981,7 @@ export {
   type SelectSignature,
   type SelectChipOptions,
   type SelectedItem,
-  type SelectedItemBlockArg
+  type SelectedItemBlockArg,
+  type DisplayLimitContentArgs
 };
 export default Select;

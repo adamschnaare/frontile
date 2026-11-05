@@ -7,11 +7,18 @@ import {
   triggerKeyEvent,
   fillIn,
   focus,
-  settled
+  settled,
+  setupOnerror
 } from '@ember/test-helpers';
 import { cell } from 'ember-resources';
-import { Select } from 'frontile';
+import {
+  Form,
+  Select,
+  type FormDataCompiled,
+  type FormResultData
+} from 'frontile';
 import { array, hash } from '@ember/helper';
+import { on } from '@ember/modifier';
 import { selectOptionByKey, ownParts } from 'frontile/test-support';
 import { trackDeprecations } from '../../../helpers/deprecations';
 
@@ -530,6 +537,46 @@ module('Integration | Component | Select | @frontile/forms', function (hooks) {
       ).dataset['key'],
       'Apple',
       'the exact match is first even though Apricot comes first in @items'
+    );
+  });
+
+  test('Enter in the open filter does not submit a wrapping form', async function (assert) {
+    const items = ['Apple', 'Banana'];
+    const selectedKey = cell<string | null>(null);
+    const onSelectionChange = (key: string | null) =>
+      (selectedKey.current = key);
+
+    // A synthetic keydown never submits a form the way a real one does, so
+    // check whether the Enter that reaches the form was canceled.
+    let enter: KeyboardEvent | undefined;
+    const onKeydown = (event: KeyboardEvent) => (enter = event);
+
+    await render(
+      <template>
+        <form {{on "keydown" onKeydown}}>
+          <Select
+            @items={{items}}
+            @isFilterable={{true}}
+            @selectedKey={{selectedKey.current}}
+            @onSelectionChange={{onSelectionChange}}
+          />
+        </form>
+      </template>
+    );
+
+    const filter = '[data-component="select"] [data-part="input"]:not(select)';
+    await click(filter);
+    await fillIn(filter, 'Ban');
+    await triggerKeyEvent(filter, 'keydown', 'Enter');
+
+    assert.true(enter?.defaultPrevented, 'Enter is canceled while open');
+    assert.strictEqual(selectedKey.current, 'Banana', 'and picks the option');
+
+    await triggerKeyEvent(filter, 'keydown', 'Enter');
+
+    assert.false(
+      enter?.defaultPrevented,
+      'once closed, Enter is left to the form'
     );
   });
 
@@ -3031,6 +3078,53 @@ module('Integration | Component | Select | @frontile/forms', function (hooks) {
       );
   });
 
+  test('with nothing selected the name contains the visible placeholder', async function (assert) {
+    await render(
+      <template>
+        <Select
+          @items={{demoUsers}}
+          @label="Merchant"
+          @placeholder="All merchants"
+          @onSelectionChange={{noop}}
+        >
+          <:selectedItem as |selected|>{{selected.label}}</:selectedItem>
+        </Select>
+        <Select
+          @items={{demoUsers}}
+          @label="Reviewers"
+          @placeholder="All reviewers"
+          @selectionMode="multiple"
+          @allowEmpty={{true}}
+          @onSelectionChange={{noopKeys}}
+        />
+        <Select
+          @items={{demoUsers}}
+          @label="Same"
+          @placeholder="Same"
+          @onSelectionChange={{noop}}
+        >
+          <:selectedItem as |selected|>{{selected.label}}</:selectedItem>
+        </Select>
+      </template>
+    );
+
+    const triggers = document.querySelectorAll(
+      '[data-component="select"] [data-part="input"]:not(select)'
+    );
+
+    // WCAG 2.5.3 Label in Name: the visible text (the placeholder) must be
+    // part of the accessible name, or speech-input users cannot say it.
+    assert
+      .dom(triggers[0])
+      .hasAttribute('aria-label', 'Merchant, All merchants');
+    assert
+      .dom(triggers[1])
+      .hasAttribute('aria-label', 'Reviewers, All reviewers');
+    assert
+      .dom(triggers[2])
+      .hasAttribute('aria-label', 'Same', 'an identical label is not repeated');
+  });
+
   test('with no label or placeholder the name is the selected text alone', async function (assert) {
     await render(
       <template>
@@ -3730,5 +3824,437 @@ module('Integration | Component | Select | @frontile/forms', function (hooks) {
       .dom('[data-component="close-button"]')
       .exists('the clear button renders');
     assert.deepEqual(ids, [], `no deprecations, got: ${ids.join(', ')}`);
+  });
+
+  module('@displayLimit', function () {
+    const INPUT = '[data-component="select"] [data-part="input"]:not(select)';
+    // `Item 1` … `Item 10`, so a query of `1` matches `Item 1` and `Item 10`.
+    const items = Array.from({ length: 10 }, (_, i) => `Item ${i + 1}`);
+    // Contains-only: keeps @items' order, so which options fall past the
+    // limit is predictable.
+    const contains = (itemValue: string, filterValue: string) =>
+      itemValue.toLowerCase().includes(filterValue.toLowerCase());
+
+    const renderedKeys = () =>
+      [
+        ...document.querySelectorAll(
+          '[data-component="listbox"] [data-component="listbox-item"]'
+        )
+      ].map((el) => (el as HTMLElement).dataset['key']);
+
+    test('it renders only the first matches and says how many are left out', async function (assert) {
+      await render(
+        <template>
+          <Select
+            @items={{items}}
+            @isFilterable={{true}}
+            @filter={{contains}}
+            @displayLimit={{3}}
+          />
+        </template>
+      );
+
+      await click(INPUT);
+      assert.deepEqual(renderedKeys(), ['Item 1', 'Item 2', 'Item 3']);
+      assert
+        .dom('[data-part="display-limit-content"]')
+        .hasText('Showing 3 of 10. Type to narrow down.');
+
+      await fillIn(INPUT, 'item');
+      assert.deepEqual(
+        renderedKeys(),
+        ['Item 1', 'Item 2', 'Item 3'],
+        'a query matching everything is capped as well'
+      );
+      assert
+        .dom('[data-part="display-limit-content"]')
+        .hasText('Showing 3 of 10. Type to narrow down.');
+    });
+
+    test('a query narrower than the limit renders every match and no limit content', async function (assert) {
+      await render(
+        <template>
+          <Select
+            @items={{items}}
+            @isFilterable={{true}}
+            @filter={{contains}}
+            @displayLimit={{3}}
+          />
+        </template>
+      );
+
+      await click(INPUT);
+      await fillIn(INPUT, '1');
+
+      assert.deepEqual(renderedKeys(), ['Item 1', 'Item 10']);
+      assert.dom('[data-part="display-limit-content"]').doesNotExist();
+      assert.dom('[data-part="empty-content"]').doesNotExist();
+    });
+
+    test('the limit keeps the best-ranked matches, not the first in @items', async function (assert) {
+      const fruits = ['Pineapple', 'Apple pie', 'Crab apple', 'Apple'];
+
+      await render(
+        <template>
+          <Select
+            @items={{fruits}}
+            @isFilterable={{true}}
+            @displayLimit={{1}}
+          />
+        </template>
+      );
+
+      await click(INPUT);
+      await fillIn(INPUT, 'apple');
+
+      assert.deepEqual(renderedKeys(), ['Apple']);
+      assert
+        .dom('[data-part="display-limit-content"]')
+        .hasText('Showing 1 of 4. Type to narrow down.');
+    });
+
+    test('a selected option past the limit is still rendered, in its place, and active on open', async function (assert) {
+      await render(
+        <template>
+          <Select
+            @items={{items}}
+            @isFilterable={{true}}
+            @filter={{contains}}
+            @displayLimit={{3}}
+            @selectedKey="Item 8"
+          />
+        </template>
+      );
+
+      await click(INPUT);
+
+      assert.deepEqual(renderedKeys(), [
+        'Item 1',
+        'Item 2',
+        'Item 3',
+        'Item 8'
+      ]);
+      assert
+        .dom('[data-component="listbox"] [data-key="Item 8"]')
+        .hasAttribute('data-selected', 'true')
+        .hasAttribute('data-active', 'true');
+      assert
+        .dom('[data-part="display-limit-content"]')
+        .hasText('Showing 4 of 10. Type to narrow down.');
+    });
+
+    test('Multiple mode: every selected option past the limit is still rendered', async function (assert) {
+      await render(
+        <template>
+          <Select
+            @items={{items}}
+            @selectionMode="multiple"
+            @isFilterable={{true}}
+            @filter={{contains}}
+            @displayLimit={{2}}
+            @selectedKeys={{array "Item 5" "Item 9"}}
+          />
+        </template>
+      );
+
+      await click(INPUT);
+
+      assert.deepEqual(renderedKeys(), [
+        'Item 1',
+        'Item 2',
+        'Item 5',
+        'Item 9'
+      ]);
+    });
+
+    test('keyboard navigation and Enter work within the rendered options', async function (assert) {
+      const selectedKey = cell<string | null>(null);
+      const onSelectionChange = (key: string | null) =>
+        (selectedKey.current = key);
+
+      await render(
+        <template>
+          <Select
+            @items={{items}}
+            @isFilterable={{true}}
+            @filter={{contains}}
+            @displayLimit={{3}}
+            @selectedKey={{selectedKey.current}}
+            @onSelectionChange={{onSelectionChange}}
+          />
+        </template>
+      );
+
+      await click(INPUT);
+      await fillIn(INPUT, 'item');
+      await triggerKeyEvent(INPUT, 'keydown', 'End');
+      assert
+        .dom('[data-component="listbox"] [data-key="Item 3"]')
+        .hasAttribute('data-active', 'true', 'End stops at the last rendered');
+
+      await triggerKeyEvent(INPUT, 'keydown', 'Enter');
+      assert.strictEqual(selectedKey.current, 'Item 3');
+    });
+
+    test('the displayLimitContent block receives the counts; hideDisplayLimitContent hides it', async function (assert) {
+      const hide = cell(false);
+
+      await render(
+        <template>
+          <Select
+            @items={{items}}
+            @isFilterable={{true}}
+            @filter={{contains}}
+            @displayLimit={{4}}
+            @hideDisplayLimitContent={{hide.current}}
+          >
+            <:displayLimitContent as |limit|>
+              <span data-test-limit>{{limit.shown}}/{{limit.total}}</span>
+            </:displayLimitContent>
+          </Select>
+        </template>
+      );
+
+      await click(INPUT);
+      assert
+        .dom('[data-part="display-limit-content"] [data-test-limit]')
+        .hasText('4/10');
+
+      hide.current = true;
+      await settled();
+      assert.dom('[data-part="display-limit-content"]').doesNotExist();
+    });
+
+    const ignoreSubmit = () => {};
+
+    const nativeKeys = () =>
+      [
+        ...(getNativeSelect() as HTMLSelectElement).querySelectorAll(
+          'option:not([value=""])'
+        )
+      ].map((el) => (el as HTMLOptionElement).value);
+
+    test('the hidden native select holds the first options and the selected ones, unfiltered', async function (assert) {
+      await render(
+        <template>
+          <Select
+            @items={{items}}
+            @isFilterable={{true}}
+            @filter={{contains}}
+            @displayLimit={{3}}
+            @selectedKey="Item 8"
+            @name="item"
+          />
+        </template>
+      );
+
+      assert.deepEqual(
+        nativeKeys(),
+        ['Item 1', 'Item 2', 'Item 3', 'Item 8'],
+        'closed'
+      );
+      assert.strictEqual(
+        (getNativeSelect() as HTMLSelectElement).value,
+        'Item 8',
+        'the form value is the selected option'
+      );
+
+      await click(INPUT);
+      await fillIn(INPUT, 'item 9');
+      assert.deepEqual(
+        nativeKeys(),
+        ['Item 1', 'Item 2', 'Item 3', 'Item 8'],
+        'the filter does not change it'
+      );
+    });
+
+    test('closed, a long list builds no more hidden options than the limit', async function (assert) {
+      const many = Array.from({ length: 2000 }, (_, i) => `Product ${i}`);
+
+      await render(
+        <template>
+          {{#each (array 1 2 3)}}
+            <Select
+              @items={{many}}
+              @isFilterable={{true}}
+              @displayLimit={{50}}
+              @selectedKey="Product 1500"
+            />
+          {{/each}}
+        </template>
+      );
+
+      assert.strictEqual(
+        document.querySelectorAll('[data-test-id="native-select"] option')
+          .length,
+        3 * 51,
+        'each holds the 50 first options and the selected one'
+      );
+    });
+
+    test('an option picked past the limit reaches the form', async function (assert) {
+      const data = cell<FormDataCompiled>();
+      const onChange = (result: FormResultData, _event: Event) => {
+        data.current = result['data'];
+      };
+
+      await render(
+        <template>
+          <Form @onChange={{onChange}} @onSubmit={{ignoreSubmit}}>
+            <Select
+              @items={{items}}
+              @isFilterable={{true}}
+              @filter={{contains}}
+              @displayLimit={{3}}
+              @name="item"
+            />
+          </Form>
+        </template>
+      );
+
+      await click(INPUT);
+      await fillIn(INPUT, 'item 9');
+      await click('[data-component="listbox"] [data-key="Item 9"]');
+
+      assert.strictEqual(data.current['item'], 'Item 9');
+      assert.deepEqual(nativeKeys(), ['Item 1', 'Item 2', 'Item 3', 'Item 9']);
+    });
+
+    test('Multiple mode: options picked past the limit reach the form', async function (assert) {
+      const data = cell<FormDataCompiled>();
+      const onChange = (result: FormResultData, _event: Event) => {
+        data.current = result['data'];
+      };
+
+      await render(
+        <template>
+          <Form @onChange={{onChange}} @onSubmit={{ignoreSubmit}}>
+            <Select
+              @items={{items}}
+              @selectionMode="multiple"
+              @isFilterable={{true}}
+              @filter={{contains}}
+              @displayLimit={{2}}
+              @name="items"
+            />
+          </Form>
+        </template>
+      );
+
+      await click(INPUT);
+      await fillIn(INPUT, 'item 7');
+      await click('[data-component="listbox"] [data-key="Item 7"]');
+      // Multiple mode stays open after a pick.
+      await fillIn(INPUT, 'item 4');
+      await click('[data-component="listbox"] [data-key="Item 4"]');
+
+      assert.deepEqual(data.current['items'], ['Item 4', 'Item 7']);
+    });
+
+    test('a long list renders no more than the limit', async function (assert) {
+      const many = Array.from({ length: 2000 }, (_, i) => `Product ${i}`);
+
+      await render(
+        <template>
+          <Select
+            @items={{many}}
+            @isFilterable={{true}}
+            @filter={{contains}}
+            @displayLimit={{50}}
+          />
+        </template>
+      );
+
+      await click(INPUT);
+      assert.strictEqual(renderedKeys().length, 50, 'on open');
+
+      await fillIn(INPUT, 'product 1');
+      assert.strictEqual(renderedKeys().length, 50, 'while filtering');
+      assert
+        .dom('[data-part="display-limit-content"]')
+        .hasText('Showing 50 of 1111. Type to narrow down.');
+    });
+
+    test('the limit content stays below the options, not under them', async function (assert) {
+      const many = Array.from({ length: 200 }, (_, i) => `Item ${i + 1}`);
+
+      await render(
+        <template>
+          <Select
+            @items={{many}}
+            @isFilterable={{true}}
+            @displayLimit={{100}}
+          />
+        </template>
+      );
+
+      await click(INPUT);
+
+      const listbox = document.querySelector(
+        '[data-component="listbox"]'
+      ) as HTMLElement;
+      const content = document.querySelector(
+        '[data-part="display-limit-content"]'
+      ) as HTMLElement;
+
+      assert.true(
+        listbox.scrollHeight > listbox.clientHeight,
+        'premise: the options overflow the listbox'
+      );
+      assert.strictEqual(
+        getComputedStyle(listbox).overflowY,
+        'auto',
+        'the listbox scrolls its own options'
+      );
+      assert.true(
+        listbox.getBoundingClientRect().bottom <=
+          content.getBoundingClientRect().top + 0.5,
+        'the options end where the limit content starts, never over it'
+      );
+    });
+
+    test('renders data-part="display-limit-content" once', async function (assert) {
+      await render(
+        <template>
+          <Select @items={{items}} @isFilterable={{true}} @displayLimit={{3}} />
+        </template>
+      );
+
+      await click(INPUT);
+
+      assert.strictEqual(
+        document.querySelectorAll('[data-part="display-limit-content"]').length,
+        1
+      );
+    });
+
+    test('it asserts on a limit without @isFilterable, or one that is not a positive integer', async function (assert) {
+      const errors: string[] = [];
+      setupOnerror((error: unknown) => {
+        errors.push((error as Error).message);
+      });
+
+      await render(
+        <template><Select @items={{items}} @displayLimit={{3}} /></template>
+      );
+      await click(INPUT);
+      await render(
+        <template>
+          <Select @items={{items}} @isFilterable={{true}} @displayLimit={{0}} />
+        </template>
+      );
+      await click(INPUT);
+
+      assert.true(
+        errors.some((m) => m.includes('@displayLimit requires @isFilterable')),
+        `asserts without @isFilterable, got: ${errors.join(' | ')}`
+      );
+      assert.true(
+        errors.some((m) =>
+          m.includes('@displayLimit must be a positive integer, received 0')
+        ),
+        `asserts on 0, got: ${errors.join(' | ')}`
+      );
+    });
   });
 });

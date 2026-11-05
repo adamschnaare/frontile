@@ -279,6 +279,127 @@ export default class FilterableSelect extends Component {
 }
 ```
 
+### Long Lists
+
+Every option in the dropdown is DOM the browser has to build, and to rebuild as the
+matches change with each keystroke. With hundreds of options, typing in the filter starts
+to lag, and on slower machines it can freeze for seconds. Set `@displayLimit` to render only
+the first matches, in the order the filter ranked them. Nobody scrolls through a thousand
+options; they type until the list is short, and the options past the limit are reached the
+same way.
+
+- The `:displayLimitContent` block, shown below the options while some are left out, says
+  how many. It yields `shown` and `total`; `@hideDisplayLimitContent` hides it.
+- Selected options are always rendered, even past the limit, so opening the Select still
+  highlights the current value.
+- The hidden native `<select>` that submits the value is limited the same way, from the
+  unfiltered list, and keeps every selected option, so the form value is never affected. A
+  page with many Selects over a long list then stays fast too: closed, each one used to
+  build a hidden option for every item.
+- `@displayLimit` requires `@isFilterable`: without a filter, the options past the limit could
+  not be reached at all.
+
+```gts preview
+import { Select } from 'frontile';
+
+const products = Array.from(
+  { length: 1000 },
+  (_, i) => `Product ${String(i + 1).padStart(4, '0')}`
+);
+
+<template>
+  <div class='demo-stack'>
+    <Select
+      @isFilterable={{true}}
+      @displayLimit={{50}}
+      @placeholder='Search 1,000 products'
+      @items={{products}}
+    />
+    <Select
+      @isFilterable={{true}}
+      @displayLimit={{50}}
+      @placeholder='With custom limit content'
+      @items={{products}}
+    >
+      <:displayLimitContent as |limit|>
+        {{limit.shown}}
+        of
+        {{limit.total}}
+        products. Keep typing to find the rest.
+      </:displayLimitContent>
+    </Select>
+  </div>
+</template>
+```
+
+### Select in a scrolling Drawer or Modal
+
+While its list is open, the Select lays a transparent backdrop over the screen (`@backdrop` defaults to `'transparent'`). On a page that is the usual dropdown behavior. Inside a Drawer or Modal whose body scrolls, a drag on the body lands on the backdrop instead, and nothing scrolls. On a phone this is easy to hit with `@isFilterable`: the keyboard takes half the screen and can cover the field, and scrolling back to it is the gesture the backdrop takes.
+
+Pass `@backdrop='none'` so the drag reaches the Drawer or Modal. A press outside the list still closes it, because the popover listens for outside clicks itself, not through the backdrop. The list follows its field while the container scrolls. For a Select on the page itself, `@blockScroll={{false}}` does the same for the page, which the Select locks while its list is open.
+
+```gts preview collapsible
+import Component from '@glimmer/component';
+import { tracked } from '@glimmer/tracking';
+import { Button, Drawer, Input, Select, Textarea } from 'frontile';
+
+const countries = [
+  'Argentina',
+  'Brazil',
+  'Canada',
+  'Denmark',
+  'Egypt',
+  'France',
+  'Germany',
+  'Italy',
+  'Japan',
+  'Mexico'
+];
+
+export default class SelectInDrawer extends Component {
+  @tracked isOpen = false;
+
+  toggle = () => {
+    this.isOpen = !this.isOpen;
+  };
+
+  <template>
+    <div class='demo-stack demo-stack--wide items-center'>
+      <Button @size='sm' @onPress={{this.toggle}}>
+        Open Shipping Address
+      </Button>
+
+      <Drawer @isOpen={{this.isOpen}} @onClose={{this.toggle}} as |d|>
+        <d.Header>Shipping address</d.Header>
+        <d.Body>
+          <div class='space-y-4'>
+            <Input @label='Full name' />
+            <Input @label='Street' />
+            <Input @label='City' />
+            <Input @label='Postal code' />
+            <Input @label='Phone' @type='tel' />
+            <Textarea @label='Delivery notes' @rows={{4}} />
+            <Select
+              @label='Country'
+              @isFilterable={{true}}
+              @backdrop='none'
+              @items={{countries}}
+            />
+            <Textarea @label='Gift message' @rows={{4}} />
+          </div>
+        </d.Body>
+        <d.Footer @class='flex gap-2'>
+          <Button @size='sm' @onPress={{this.toggle}}>Cancel</Button>
+          <Button @size='sm' @color='primary' @onPress={{this.toggle}}>
+            Save
+          </Button>
+        </d.Footer>
+      </Drawer>
+    </div>
+  </template>
+}
+```
+
 ### Item Object Format
 
 When using the `@items` argument, you can pass items as either primitives (strings or numbers) or objects. The `Select` component automatically extracts a key and label for each item using a flexible approach:
@@ -1088,6 +1209,9 @@ composed from two halves: the field label (falling back to `@placeholder`) and t
 options' own text — `Assignee, John Doe` for the example above. Either half on its own is used
 alone when the other is missing, so the name is never `Assignee, ` and never prefixes the
 selection with the untranslatable `Select options`.
+
+With nothing selected the name includes the placeholder — `Assignee, Choose an assignee`.
+When `@label` and `@placeholder` are identical, the name is not repeated.
 
 **This name replaces whatever your block renders, so keep the two in agreement.** If your
 block's visible text is the option's `label`, they already agree and there is nothing to do —
